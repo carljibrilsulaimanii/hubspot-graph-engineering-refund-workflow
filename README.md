@@ -28,6 +28,7 @@ A ticket-based HubSpot workflow that handles refund requests from start to finis
   - [Step 3: Create the workflow and trigger](#step-3-create-the-workflow-and-trigger)
   - [Step 4: Mark the run and copy the email](#step-4-mark-the-run-and-copy-the-email)
   - [Step 5: Classify (AI)](#step-5-classify-ai)
+  - [Step 5, Breeze option: Classify with HubSpot's own AI](#step-5-breeze-option-classify-with-hubspots-own-ai)
   - [Step 6: Look up order](#step-6-look-up-order)
   - [Step 7: Refund policy](#step-7-refund-policy)
   - [Step 8: Fraud signals](#step-8-fraud-signals)
@@ -103,6 +104,8 @@ The whole build is done by hand in HubSpot, Stripe and the Claude Console. Claud
 | Stripe account | Any, with test mode | Charge lookup, fraud history, refunds | Dashboard shows the **Test mode** toggle |
 | Stripe Radar | Included with Stripe payments | `outcome.risk_level` on each charge, used by Fraud signals | A test charge's detail page shows a risk level |
 | Claude API (Anthropic Console) | Pay-as-you-go | The two AI steps call `claude-opus-5-5` | A key is listed under **API keys** in the Console |
+| HubSpot Credits (Breeze option only) | Professional or Enterprise in any of Marketing, Sales, Service, Data, Smart CRM or Revenue Hub, with credits in the account | The **Data Agent: Custom prompt** action uses credits on every run | Your account's credits usage page shows a balance (wording may differ) |
+| Breeze AI settings (Breeze option only) | Generative AI tools and CRM data access turned on | Required before AI workflow actions run | The **AI** section appears in the workflow action menu |
 
 **Permissions and scopes**
 
@@ -251,6 +254,59 @@ About 10 minutes.
 | Classify `status = error` | **Go to action** → Step 13 (branch on the `status` output first, wording may differ) |
 
 ✅ **Check:** a refund test ticket reaches the `refund_request` branch and a complaint does not.
+
+### Step 5, Breeze option: Classify with HubSpot's own AI
+
+About 10 minutes. Use this **instead of** 5a to 5c if you'd rather not call Claude for this step. Decide ([Step 9](#step-9-decide-ai)) stays in code either way.
+
+**5a (Breeze). Add the AI action.** Click **+**, open the **AI** section, choose **Data Agent: Custom prompt** (wording may differ). It is marked Beta.
+
+**5b (Breeze). Write the prompt.** In **Message**, paste the prompt below. Replace the two bracketed lines with the **Ticket name** and **Ticket description** tokens from the data panel. The prompt can be up to 3,000 characters. The AI sees only what is in the prompt.
+
+```text
+Sort this customer support ticket into exactly one category.
+refund_request: the customer wants money back for a purchase.
+complaint: the customer is unhappy but is not asking for money back.
+other: anything else, such as a login problem or a question.
+If the ticket both complains and asks for money back, answer refund_request.
+Answer with the category only.
+
+Ticket name: [insert the Ticket name token]
+Ticket description: [insert the Ticket description token]
+```
+
+**5c (Breeze). Fix the output.** Define the output as an **Enumeration** with three values: `refund_request`, `complaint`, `other`. A fixed list keeps the answer usable in the branch.
+
+**5d (Breeze). Test action.** Pick a test ticket that asks for money back. Success looks like: the action shows Success and the response is `refund_request`.
+
+**5e (Breeze). Save and branch.** Add **Edit record**: Refund request type = the action's **Response**. Then add **Branch → One property or action output**, and under **Action data** pick the Data Agent action and its **Response**:
+
+| Response | Add on that branch |
+|---|---|
+| `refund_request` | Continue to Step 6 |
+| `complaint` | Rotate owner to your support team, then end |
+| `other` | End |
+| Empty | **Go to action** → [Step 13](#step-13-the-failed-path) |
+
+> ⚠️ **An empty response is how Breeze fails.** When the account runs out of credits, the action fails and writes nothing instead of raising an error. Without the Empty branch, those tickets stall with no type.
+
+**Trade-offs against the Claude code step:**
+
+| | Breeze Data Agent | Claude in a code step ([`code/1-classify.js`](code/1-classify.js)) |
+|---|---|---|
+| Setup | No code and no API key | Code action, a secret and a Claude API key |
+| Cost | HubSpot Credits on every run | Claude API billing on every run |
+| Status | Beta | Generally available API |
+| When it fails | Out of credits: empty response, no error | `status = error`, and HubSpot retries rate-limit and server errors |
+| Output control | Fixed list of values (Enumeration) | Strict JSON schema |
+| Model | HubSpot chooses | Pinned to `claude-opus-5-5` |
+| Time limit | None published | 20 seconds per code action |
+
+**Why Decide stays in code.** Decide has to cite a policy clause, and the code confirms that clause really exists before anything acts on it, retrying up to 3 times if it doesn't. A Breeze action answers once, and a branch can't check one property's value against a list held in another, so a made-up clause would go straight through.
+
+Sources: [Use Breeze to manage data in workflows](https://knowledge.hubspot.com/workflows/use-ai-to-manage-data-in-workflows), [Choose your workflow actions](https://knowledge.hubspot.com/workflows/choose-your-workflow-actions).
+
+✅ **Check:** a refund test ticket reaches the `refund_request` branch, and a ticket run with no credits left lands on the Failed path.
 
 ### Step 6: Look up order
 
@@ -497,6 +553,7 @@ About 30 minutes.
 | Stripe returns 401 | Wrong key, or a test key against live data | Re-save `REFUND_GRAPH_STRIPE`. [Step 2](#step-2-create-the-two-api-keys-and-secrets) |
 | Decide fails every time | **Refund policy clauses** is empty | Check Step 7 saved its output. [Step 7](#step-7-refund-policy) |
 | Refund fails with "already refunded" | The charge was refunded outside this workflow | Close the ticket by hand. [Step 12](#step-12-issue-refund-and-close) |
+| Breeze Classify leaves Refund request type empty | The account ran out of HubSpot Credits, so the action wrote nothing | Add credits, and keep the Empty branch. [Step 5, Breeze option](#step-5-breeze-option-classify-with-hubspots-own-ai) |
 | Edit record fails on the order date | The output isn't typed **Date** | Set `order_date` to Date. [Step 6](#step-6-look-up-order) |
 
 ## Limits
@@ -506,7 +563,7 @@ About 30 minutes.
 - **Fixed path.** A request that needs something new, such as a partial refund or a replacement, falls to a person.
 - **Full refunds of the newest charge only.** Partial refunds and multi-charge orders are out of scope.
 - **Placeholders.** The policy clauses, the $500 limit, the 0.8 fraud cut-off and the fraud weights all need your own values.
-- **AI cost.** Each refund request makes two to four Claude calls at low effort.
+- **AI cost.** Each refund request makes two to four Claude calls at low effort. With the Breeze option, Classify uses HubSpot Credits instead and Decide still calls Claude.
 
 ## Security
 
